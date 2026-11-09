@@ -542,6 +542,10 @@ export interface AgyAdapterDeps {
    */
   sessionCwd?: (sessionId: string) => string | undefined
   /**
+   * Determine whether a session is readonly (e.g. recon, review, observer).
+   */
+  isReadonlySession?: (sessionId: string) => boolean
+  /**
    * Resolve the live goal info (goalId, revision) for this session.
    * `null` means "authoritatively no active, armed goal"; `undefined` means the
    * live goal service is unavailable and history detection may be used instead.
@@ -754,6 +758,56 @@ export function calcPromptTokens(usage: RawUsage | null | undefined): number | u
   const cacheWrite = typeof usage.cache_write_tokens === 'number' && usage.cache_write_tokens > 0 ? usage.cache_write_tokens : 0
   const totalPrompt = input + cacheRead + cacheWrite
   return totalPrompt > 0 ? totalPrompt : undefined
+}
+
+export const READONLY_MEMBER_PREFIXES = [
+  'team-recon-',
+  'team-ops-',
+  'team-review-',
+  'team-reviewer-',
+  'reviewer-',
+  'recon-',
+]
+
+export function isReadonlyMemberName(str: unknown): boolean {
+  if (typeof str !== 'string' || !str) return false
+  const s = str.trim().toLowerCase()
+  const clean = s.startsWith('session-') ? s.slice(8) : (s.startsWith('session_') ? s.slice(8) : s)
+  if (READONLY_MEMBER_PREFIXES.some((p) => clean.startsWith(p) || s.startsWith(p))) return true
+  if (
+    clean === 'reviewer' ||
+    clean === 'recon' ||
+    clean === 'review' ||
+    clean === 'team-review' ||
+    clean === 'team-reviewer' ||
+    clean === 'team-recon' ||
+    clean === 'team-ops'
+  ) {
+    return true
+  }
+  return false
+}
+
+export function isReadonlyTarget(obj: unknown): boolean {
+  if (!obj || typeof obj !== 'object') return false
+  const o = obj as Record<string, any>
+  if (o.readonly === true || o.isReadonly === true || o.mode === 'plan' || o.permissionMode === 'plan') return true
+  const candidates = [
+    o.name,
+    o.label,
+    o.role,
+    o.target,
+    o.id,
+    o.options?.name,
+    o.options?.role,
+    o.membership?.name,
+    o.membership?.role,
+    o.header?.name,
+    o.header?.role,
+    o.header?.member,
+    o.header?.target,
+  ]
+  return candidates.some((c) => isReadonlyMemberName(c))
 }
 
 export class AgyAdapter extends LlmAdapter {
@@ -1173,7 +1227,11 @@ export class AgyAdapter extends LlmAdapter {
     else args.push('--mode', opts.permissionMode)
     const effectiveModel = resolveModelSlug(opts.model)
     if (effectiveModel !== '') args.push('--model', effectiveModel)
-    const isEffortCapable = effectiveModel === '' || effectiveModel.toLowerCase().startsWith('gemini') || effectiveModel.toLowerCase().startsWith('argon') || effectiveModel.toLowerCase().startsWith('claude')
+    const isEffortCapable =
+      effectiveModel === '' ||
+      effectiveModel.toLowerCase().startsWith('gemini') ||
+      effectiveModel.toLowerCase().startsWith('argon') ||
+      (effectiveModel.toLowerCase().startsWith('claude') && (effectiveModel.toLowerCase().includes('5-5') || effectiveModel.toLowerCase().includes('5.5')))
     if (isEffortCapable && opts.effort && opts.effort !== '') args.push('--effort', opts.effort)
     if (opts.conversationId) args.push('--conversation', opts.conversationId)
     for (const d of opts.addDirs ?? []) args.push('--add-dir', d)
@@ -2115,12 +2173,39 @@ export class AgyAdapter extends LlmAdapter {
       )
       prompt = trimToUtf8Bytes(prompt, AGY_PROMPT_SAFE_BYTES)
     }
+    const optAny = options as Record<string, any>
+    const isExplicitPlan =
+      optAny.permissionMode === 'plan' ||
+      optAny.mode === 'plan' ||
+      optAny.readonly === true ||
+      optAny.isReadonly === true
+    const isReadonlyCaller = Boolean(
+      isExplicitPlan ||
+        (optAny.name && isReadonlyMemberName(optAny.name)) ||
+        (optAny.role && isReadonlyMemberName(optAny.role)) ||
+        (optAny.agent && isReadonlyTarget(optAny.agent)) ||
+        (sessionKey !== '' && isReadonlyMemberName(sessionKey)) ||
+        (sessionKey !== '' && Boolean(this.deps.isReadonlySession?.(sessionKey))),
+    )
+    const effectivePermissionMode =
+      isAux && !isTitle
+        ? 'plan'
+        : isReadonlyCaller
+          ? 'plan'
+          : (optAny.permissionMode ?? cfg.permissionMode)
+    if (isReadonlyCaller) {
+      this.deps.log?.(
+        '[readonly-guard] session ' +
+          (sessionKey || 'anon') +
+          ' identified as readonly member/delegation — starting agy in plan mode (--mode plan)',
+      )
+    }
     const argsBase = this.buildArgs({
       prompt,
       model: activeModelForArgs,
       effort,
       conversationId: persistBinding && binding !== undefined ? binding.conversationId : undefined,
-      permissionMode: isAux && !isTitle ? 'plan' : cfg.permissionMode,
+      permissionMode: effectivePermissionMode,
       timeoutMs: cfg.timeoutMs,
       printTimeoutMinutes,
       extraArgs: cfg.extraArgs,
@@ -2135,7 +2220,7 @@ export class AgyAdapter extends LlmAdapter {
           model: activeModelForArgs,
           effort,
           conversationId: persistBinding && binding !== undefined ? binding.conversationId : undefined,
-          permissionMode: isAux && !isTitle ? 'plan' : cfg.permissionMode,
+          permissionMode: effectivePermissionMode,
           timeoutMs: cfg.timeoutMs,
           printTimeoutMinutes,
           extraArgs: cfg.extraArgs,
