@@ -196,7 +196,7 @@ export function startMcpBridge(opts: {
           return
         }
         const tools = svc.schemas(agent)
-          .filter((t) => allow.length === 0 || allowSet.has(t.name))
+          .filter((t) => (allow.length === 0 || allowSet.has(t.name)) && (t.name !== 'run_code' || allow.length === 0))
           // internal transports / loopback-only helpers are not bridgeable
           .filter((t) => !INTERNAL_TOOL_NAMES.has(t.name))
           .map((t) => {
@@ -260,7 +260,7 @@ export function startMcpBridge(opts: {
         // (possibly prompt-injected) child POST /call with an arbitrary dshName
         // and reach tools outside the allowlist. Empty allowlist = all allowed.
         const allow = opts.allowlist().split(',').map((s) => s.trim()).filter(Boolean)
-        if (allow.length > 0 && !allow.includes(dshName)) {
+        if (allow.length > 0 && (!allow.includes(dshName) || dshName === 'run_code')) {
           audit('denied: not in allowlist')
           sendJson(res, 403, { error: 'tool not allowed' })
           return
