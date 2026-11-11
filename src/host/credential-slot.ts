@@ -699,7 +699,7 @@ export interface SlotLease {
 }
 
 export class SlotUnavailableError extends Error {
-  constructor(message: string) {
+  constructor(message: string, readonly accountCredentialInvalid = false) {
     super(message)
     this.name = 'SlotUnavailableError'
   }
@@ -1217,6 +1217,7 @@ export async function acquireCredentialSlot(
       done()
       throw new SlotUnavailableError(
         `Account ${account.alias || account.id} has no stored credential. Sign it in again before using it.`,
+        true,
       )
     }
 
@@ -1225,6 +1226,7 @@ export async function acquireCredentialSlot(
       done()
       throw new SlotUnavailableError(
         `Account ${account.alias || account.id} has an unreadable credential file. Sign it in again.`,
+        true,
       )
     }
 
@@ -1236,6 +1238,7 @@ export async function acquireCredentialSlot(
       throw new SlotUnavailableError(
         `Account ${account.alias || account.id} holds the SAME credential as the primary account — ` +
           'its login was overwritten. Sign this account in again to restore its own token.',
+        true,
       )
     }
 

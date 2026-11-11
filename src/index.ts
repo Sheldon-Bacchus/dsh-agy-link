@@ -10,7 +10,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync, readdirSync } from 
 import { dshHome, overridesPath, readOverrides, resolveConfig, stateDir } from './common/config.ts'
 import { Err, PLUGIN_ID, PROVIDER_ID, type PluginConfig } from './common/types.ts'
 import type { ManagedAccount } from './common/pool-types.ts'
-import { AgyAdapter } from './host/adapter.ts'
+import { AgyAdapter, isReadonlyMemberName, isReadonlyTarget } from './host/adapter.ts'
 import { defineAgyAskTool } from './host/ask-tool.ts'
 import { AuthHelper } from './host/auth.ts'
 import { agyCommandDefinition } from './host/commands.ts'
@@ -281,6 +281,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
   }
 
   const webServerPort: { current?: number } = {}
+  const __RO_SESSION_CACHE = new Map<string, boolean>()
 
   const adapter = new AgyAdapter({
     getConfig,
@@ -291,10 +292,53 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
     acquire: (signal) => semaphore.acquire(signal),
     log,
     runs,
+    getBridge: () => bridgeState.bridge,
     getMediaBaseUrl: () => (webServerPort.current ? `http://127.0.0.1:${webServerPort.current}/plugins/agy-link/media` : null),
     effortUnsupported: () => readEffortUnsupported(),
     onEffortUnsupported: (model) => rememberEffortUnsupported(model),
     sessionCwd: (sessionId) => sessionWorkspace(sessionId),
+    isReadonlySession: (sessionId) => {
+      if (!sessionId) return false
+      const sid = String(sessionId)
+      try {
+        if (isReadonlyMemberName(sid)) return true
+        if (__RO_SESSION_CACHE.has(sid)) return __RO_SESSION_CACHE.get(sid)!
+        let verdict = false
+        try {
+          const agents = (ctx.get('agents') ?? (ctx as unknown as { agents?: any }).agents) as any
+          const agent = agents?.get?.(sid)
+          if (isReadonlyTarget(agent)) verdict = true
+          if (!verdict) {
+            const list = agents?.list?.()
+            if (Array.isArray(list)) {
+              const hit = list.find((a: any) => a && (a.id === sid || a.sessionId === sid || a.session?.id === sid))
+              if (isReadonlyTarget(hit)) verdict = true
+            }
+          }
+          if (!verdict) {
+            const sessions = (ctx.get('sessions') ?? (ctx as unknown as { sessions?: any }).sessions) as any
+            const session = sessions?.get?.(sid)
+            if (isReadonlyTarget(session) || isReadonlyTarget(session?.header)) verdict = true
+            if (!verdict) {
+              const evs = session?.snapshotEvents?.() ?? session?.ownEvents?.() ?? session?.log ?? session?.events
+              if (Array.isArray(evs)) {
+                for (let i = evs.length - 1; i >= 0 && i >= evs.length - 300; i--) {
+                  const ev = evs[i]
+                  if (ev && ev.type === 'subagent/descriptor' && ev.data && typeof ev.data === 'object') {
+                    if (isReadonlyMemberName(ev.data.label) || isReadonlyMemberName(ev.data.name) || isReadonlyTarget(ev.data)) verdict = true
+                    break
+                  }
+                }
+              }
+            }
+          }
+        } catch {}
+        if (verdict) __RO_SESSION_CACHE.set(sid, verdict)
+        return verdict
+      } catch {
+        return false
+      }
+    },
     sessionGoal: (sessionId) => {
       try {
         const agents = (ctx.get('agents') as { get(id: unknown): unknown } | undefined)

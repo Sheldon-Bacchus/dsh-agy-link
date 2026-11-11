@@ -87,6 +87,8 @@ export interface McpBridge {
   /** Base URL of the loopback endpoint. */
   url: string
   port: number
+  registerSession(sessionId: string): string
+  revokeSession(sessionId: string, secret: string): void
   close(): Promise<void>
 }
 
@@ -160,6 +162,7 @@ export function startMcpBridge(opts: {
   maxBodyBytes?: number
 }): Promise<McpBridge> {
   const token = randomBytes(24).toString('hex')
+  const sessionSecrets = new Map<string, Set<string>>()
   let callSeq = 0
   const server: Server = createServer((req, res) => {
     void (async () => {
@@ -167,6 +170,13 @@ export function startMcpBridge(opts: {
       const auth = String(req.headers['authorization'] ?? '')
       if (!bearerMatches(auth, 'Bearer ' + token)) {
         sendJson(res, 401, { error: 'unauthorized' })
+        return
+      }
+      const session = String(req.headers['x-dsh-session'] ?? '').trim()
+      const sessionSecret = String(req.headers['x-dsh-session-secret'] ?? '').trim()
+      if ((session !== '' && !sessionSecrets.get(session)?.has(sessionSecret)) ||
+          ((url === '/call' || url === '/mcp/call') && session === '')) {
+        sendJson(res, 403, { error: 'session authentication failed' })
         return
       }
       if ((req.method === 'GET' || req.method === 'POST') && (url === '/tools' || url === '/mcp/tools')) {
@@ -178,7 +188,15 @@ export function startMcpBridge(opts: {
         const allow = opts.allowlist().split(',').map((s) => s.trim()).filter(Boolean)
         const allowSet = new Set(allow)
         const used = new Set<string>()
-        const tools = svc.schemas()
+        let agent = session === '' ? undefined : await Promise.resolve(opts.resolveAgent?.(session))
+        if (agent === undefined && session !== '' && !session.startsWith('session-')) {
+          agent = await Promise.resolve(opts.resolveAgent?.('session-' + session))
+        }
+        if (session !== '' && agent === undefined) {
+          sendJson(res, 403, { error: 'session agent unavailable' })
+          return
+        }
+        const tools = svc.schemas(agent)
           .filter((t) => allow.length === 0 || allowSet.has(t.name))
           // internal transports / loopback-only helpers are not bridgeable
           .filter((t) => !INTERNAL_TOOL_NAMES.has(t.name))
@@ -266,6 +284,28 @@ export function startMcpBridge(opts: {
           if (agent === undefined && sessionHeader !== '' && !sessionHeader.startsWith('session-')) {
             agent = await resolveSession('session-' + sessionHeader)
           }
+          if (agent === undefined || !svc.schemas(agent).some((tool) => tool.name === dshName)) {
+            audit('denied: tool outside caller scope')
+            sendJson(res, 403, { error: 'tool not available to session' })
+            return
+          }
+          type SessionEvents = { snapshotEvents?: () => readonly { type: string }[]; ownEvents?: () => readonly { type: string }[]; events?: readonly { type: string }[]; log?: readonly { type: string }[] }
+          const scopedAgent = agent as SessionEvents & { session?: SessionEvents }
+          const callerSession = scopedAgent.session ?? scopedAgent
+          const events = callerSession.snapshotEvents?.() ?? callerSession.ownEvents?.() ?? callerSession.events ?? callerSession.log
+          let openTurn = false
+          let openStep = false
+          for (const event of events ?? []) {
+            if (event.type === 'turn/start') { openTurn = true; openStep = false }
+            else if (event.type === 'turn/end') { openTurn = false; openStep = false }
+            else if (event.type === 'step/start' && openTurn) openStep = true
+            else if (event.type === 'step/end') openStep = false
+          }
+          if (!openTurn || !openStep) {
+            audit('denied: no open caller turn and step')
+            sendJson(res, 403, { error: 'caller has no open turn and step' })
+            return
+          }
           // Every DSH tool receives `exec.signal`; tools that await inside their
           // body read it, so a call without one throws
           // `Cannot read properties of undefined (reading 'aborted')`.
@@ -278,29 +318,28 @@ export function startMcpBridge(opts: {
           res.once('close', () => {
             if (!res.writableEnded) controller.abort()
           })
-          // PTC mode rejects model-direct tool calls. 0.2.1 gates that on a
-          // per-call `parent` token, 0.2.2 on the execution source, so keep the
-          // token only for a PTC surface: native calls must not carry it (a
-          // pre-execute hook treats any parent as a PTC dispatch and then looks
-          // for a session-log start that a native call does not have).
+          // PTC requires the host-owned transport so nested calls retain its policy checks.
           const callId = 'agy-mcp-' + callSeq
           const isPtc = svc.schemas(agent).some((tool) => tool.name === 'run_code')
+          const dispatchName = isPtc ? 'run_code' : dshName
+          const dispatchArgs = isPtc
+            ? { code: `return await tools[${JSON.stringify(dshName)}](${JSON.stringify(parsed.arguments ?? {})});`, description: `MCP call: ${dshName}` }
+            : parsed.arguments ?? {}
           const result = await svc.execute({
             calls: [{
               type: 'tool-call',
               id: callId,
-              name: dshName,
+              name: dispatchName,
               // The batch API expects the raw model JSON text; it parses it and
               // keeps malformed input for tool-owned diagnostics.
-              arguments: JSON.stringify(parsed.arguments ?? {}),
+              arguments: JSON.stringify(dispatchArgs),
             }],
             signal: controller.signal,
             ...(agent === undefined ? {} : { agent }),
             // DSH 0.2.1 compatibility (ignored by 0.2.2+).
             callId,
-            name: dshName,
-            arguments: parsed.arguments ?? {},
-            ...(isPtc ? { parent: Symbol(callId) } : {}),
+            name: dispatchName,
+            arguments: dispatchArgs,
           })
           audit('ok caller=' + (agent === undefined ? 'none' : 'agent'))
           sendJson(res, 200, { ok: true, text: resultText(settledToolResult(result, callId)) })
@@ -327,6 +366,18 @@ export function startMcpBridge(opts: {
         token,
         url: 'http://127.0.0.1:' + port,
         port,
+        registerSession: (sessionId) => {
+          const secret = randomBytes(32).toString('hex')
+          const secrets = sessionSecrets.get(sessionId) ?? new Set<string>()
+          secrets.add(secret)
+          sessionSecrets.set(sessionId, secrets)
+          return secret
+        },
+        revokeSession: (sessionId, secret) => {
+          const secrets = sessionSecrets.get(sessionId)
+          secrets?.delete(secret)
+          if (secrets?.size === 0) sessionSecrets.delete(sessionId)
+        },
         close: () => new Promise<void>((done) => server.close(() => done())),
       })
     })
@@ -371,7 +422,7 @@ export function mcpServerKey(port: number): string {
  * Returns a restore function that puts the previous content back (or deletes
  * the file we created). Never throws.
  */
-export function writeMcpConfig(file: string, bridge: McpBridge): () => void {
+export function writeMcpConfig(file: string, bridge: Pick<McpBridge, 'port' | 'bridgeScript' | 'url' | 'token' | 'close'>): () => void {
   const key = mcpServerKey(bridge.port)
   let previous: string | null = null
   try {
@@ -392,10 +443,30 @@ export function writeMcpConfig(file: string, bridge: McpBridge): () => void {
   if (MCP_SERVER_KEY in servers) {
     delete servers[MCP_SERVER_KEY]
   }
+  const pruned: string[] = []
+  for (const [name, value] of Object.entries(servers)) {
+    if (name === key || !/^dsh-tools-\d+$/.test(name) || !value || typeof value !== 'object') continue
+    const pid = (value as { dshPid?: unknown }).dshPid
+    if (typeof pid !== 'number' || !Number.isInteger(pid) || pid <= 0) continue
+    try {
+      process.kill(pid, 0)
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ESRCH') continue
+      delete servers[name]
+      pruned.push(name)
+    }
+  }
+  let restorePrevious = previous
+  if (previous !== null && pruned.length > 0) {
+    const snapshot = JSON.parse(previous) as { mcpServers: Record<string, unknown> }
+    for (const name of pruned) delete snapshot.mcpServers[name]
+    restorePrevious = JSON.stringify(snapshot, null, 2) + '\n'
+  }
   servers[key] = {
     type: 'stdio',
     command: process.execPath,
     args: [bridge.bridgeScript],
+    dshPid: process.pid,
     env: {
       DSH_MCP_URL: bridge.url,
       DSH_MCP_TOKEN: bridge.token,
@@ -472,7 +543,7 @@ export function writeMcpConfig(file: string, bridge: McpBridge): () => void {
           writeFileSync(file, JSON.stringify({ ...parsed, mcpServers: curServers }, null, 2) + '\n', 'utf8')
         }
       } else {
-        writeFileSync(file, previous, 'utf8')
+        writeFileSync(file, restorePrevious!, 'utf8')
       }
     } catch {
       /* best effort */

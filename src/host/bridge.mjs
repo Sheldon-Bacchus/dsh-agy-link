@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline'
 const URL_BASE = process.env.DSH_MCP_URL || ''
 const TOKEN = process.env.DSH_MCP_TOKEN || ''
 const SESSION = process.env.DSH_MCP_SESSION || ''
+const SESSION_SECRET = process.env.DSH_MCP_SESSION_SECRET || ''
 const PROTOCOL = '2024-11-05'
 
 function post(path, body) {
@@ -32,6 +33,7 @@ function post(path, body) {
         'Content-Length': Buffer.byteLength(data),
         Authorization: 'Bearer ' + TOKEN,
         ...(SESSION === '' ? {} : { 'X-DSH-Session': SESSION }),
+        ...(SESSION_SECRET === '' ? {} : { 'X-DSH-Session-Secret': SESSION_SECRET }),
       },
       timeout: 600000,
     });

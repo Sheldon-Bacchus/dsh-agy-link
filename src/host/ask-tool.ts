@@ -7,7 +7,7 @@ import type { Catalog } from './models.ts'
 import { defaultEffortFor, findEntry } from './models.ts'
 import type { OneShotDeps } from './oneshot.ts'
 import { runAgyOnce } from './oneshot.ts'
-import { parseEffortUnsupported } from './adapter.ts'
+import { isReadonlyTarget, parseEffortUnsupported } from './adapter.ts'
 
 const ALIASES: Readonly<Record<string, string>> = {
   flash: 'gemini',
@@ -129,7 +129,7 @@ export function defineAgyAskTool(deps: OneShotDeps & { catalog: () => Catalog })
           prompt: args.prompt,
           model: model === '' ? undefined : model,
           effort,
-          mode: args.mode,
+          mode: isReadonlyTarget(exec.agent) ? 'plan' : args.mode,
           timeoutMs: args.timeoutMinutes ? args.timeoutMinutes * 60_000 : undefined,
           signal: exec.signal,
           readPaths,

@@ -528,12 +528,14 @@ export interface AgyAdapterDeps {
   log?: (msg: string) => void
   /** Recordings shared with the agy_tool mirror (native tool-card mirroring). */
   runs: RunRegistry
+  getBridge?: () => import('./mcp-bridge.ts').McpBridge | null
   /**
    * Resolve the DSH session's working directory. Called with the raw
    * session id; return an absolute path to run agy inside that workspace.
    * Explicit config `workspaceRoot` still wins over this value.
    */
   sessionCwd?: (sessionId: string) => string | undefined
+  isReadonlySession?: (sessionId: string) => boolean
   /**
    * Resolve the live goal info (goalId, revision) for this session.
    * `null` means "authoritatively no active, armed goal"; `undefined` means the
@@ -747,6 +749,56 @@ export function calcPromptTokens(usage: RawUsage | null | undefined): number | u
   const cacheWrite = typeof usage.cache_write_tokens === 'number' && usage.cache_write_tokens > 0 ? usage.cache_write_tokens : 0
   const totalPrompt = input + cacheRead + cacheWrite
   return totalPrompt > 0 ? totalPrompt : undefined
+}
+
+export const READONLY_MEMBER_PREFIXES = [
+  'team-recon-',
+  'team-ops-',
+  'team-review-',
+  'team-reviewer-',
+  'reviewer-',
+  'recon-',
+]
+
+export function isReadonlyMemberName(str: unknown): boolean {
+  if (typeof str !== 'string' || !str) return false
+  const s = str.trim().toLowerCase()
+  const clean = s.startsWith('session-') ? s.slice(8) : (s.startsWith('session_') ? s.slice(8) : s)
+  if (READONLY_MEMBER_PREFIXES.some((p) => clean.startsWith(p) || s.startsWith(p))) return true
+  if (
+    clean === 'reviewer' ||
+    clean === 'recon' ||
+    clean === 'review' ||
+    clean === 'team-review' ||
+    clean === 'team-reviewer' ||
+    clean === 'team-recon' ||
+    clean === 'team-ops'
+  ) {
+    return true
+  }
+  return false
+}
+
+export function isReadonlyTarget(obj: unknown): boolean {
+  if (!obj || typeof obj !== 'object') return false
+  const o = obj as Record<string, any>
+  if (o.readonly === true || o.isReadonly === true || o.mode === 'plan' || o.permissionMode === 'plan') return true
+  const candidates = [
+    o.name,
+    o.label,
+    o.role,
+    o.target,
+    o.id,
+    o.options?.name,
+    o.options?.role,
+    o.membership?.name,
+    o.membership?.role,
+    o.header?.name,
+    o.header?.role,
+    o.header?.member,
+    o.header?.target,
+  ]
+  return candidates.some((c) => isReadonlyMemberName(c))
 }
 
 export class AgyAdapter extends LlmAdapter {
@@ -1180,7 +1232,9 @@ export class AgyAdapter extends LlmAdapter {
    * (an explicit request, `defaultEffort`, or the aux channel's pinning).
    */
   override async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
-    for (let attempt = 0; ; attempt++) {
+    let suppressEffort = false
+    let credentialRetries = 0
+    for (;;) {
       // A refused attempt emits a bare `usage` chunk before its error finish
       // (measured on agy 1.4.6). Usage is telemetry, not output: hold it back so
       // a replayed attempt cannot double-count tokens, and treat only real
@@ -1188,29 +1242,39 @@ export class AgyAdapter extends LlmAdapter {
       let emitted = false
       const telemetry: StreamChunk[] = []
       let finish: StreamChunk | null = null
-      for await (const chunk of this.streamAttempt(options, attempt > 0)) {
-        if (chunk.type === 'finish') {
-          // Hold the finish back one step: a refusal must not reach the caller
-          // when the replay is about to succeed.
-          finish = chunk
+      try {
+        for await (const chunk of this.streamAttempt(options, suppressEffort)) {
+          if (chunk.type === 'finish') {
+            // Hold the finish back one step: a refusal must not reach the caller
+            // when the replay is about to succeed.
+            finish = chunk
+            continue
+          }
+          if (chunk.type === 'usage') {
+            telemetry.push(chunk)
+            continue
+          }
+          emitted = true
+          yield chunk
+        }
+      } catch (error) {
+        if (error instanceof SlotUnavailableError && error.accountCredentialInvalid && !emitted && credentialRetries < this.deps.getConfig().dispatchRetries) {
+          credentialRetries++
           continue
         }
-        if (chunk.type === 'usage') {
-          telemetry.push(chunk)
-          continue
-        }
-        emitted = true
-        yield chunk
+        if (error instanceof SlotUnavailableError) throw new LlmError(error.message, Err.AGY_ERROR)
+        throw error
       }
       if (finish === null) {
         for (const chunk of telemetry) yield chunk
         return
       }
-      if (attempt === 0 && !emitted && finish.reason.kind === 'error') {
+      if (!suppressEffort && !emitted && finish.reason.kind === 'error') {
         const failure = (finish.reason as { failure?: { message?: string } }).failure
         const refused = parseEffortUnsupported(String(failure?.message ?? ''))
         if (refused !== null) {
           this.learnEffortUnsupported(refused)
+          suppressEffort = true
           continue
         }
       }
@@ -1247,8 +1311,15 @@ export class AgyAdapter extends LlmAdapter {
     // callers often need `skip`). Everything else keeps the historical rules:
     // aux runs are read-only plan mode, titles keep the configured mode.
     const imageModeRaw = isImage ? (options as { agyPermissionMode?: unknown }).agyPermissionMode : undefined
+    const readonlyOptions = options as unknown as Record<string, unknown>
+    const readonlySessionId = options.sessionId !== undefined ? String(options.sessionId) : ''
+    const readonlyCaller = readonlyOptions.permissionMode === 'plan' || readonlyOptions.mode === 'plan' ||
+      readonlyOptions.readonly === true || readonlyOptions.isReadonly === true ||
+      isReadonlyMemberName(readonlyOptions.name) || isReadonlyMemberName(readonlyOptions.role) ||
+      isReadonlyTarget(readonlyOptions.agent) || isReadonlyMemberName(readonlySessionId) ||
+      (readonlySessionId !== '' && this.deps.isReadonlySession?.(readonlySessionId) === true)
     const effectivePermissionMode: PluginConfig['permissionMode'] =
-      imageModeRaw === 'skip' || imageModeRaw === 'plan' || imageModeRaw === 'accept-edits'
+      readonlyCaller ? 'plan' : imageModeRaw === 'skip' || imageModeRaw === 'plan' || imageModeRaw === 'accept-edits'
         ? imageModeRaw
         : isAux && !isTitle && !isImage
           ? 'plan'
@@ -2316,6 +2387,10 @@ export class AgyAdapter extends LlmAdapter {
               Err.TIMEOUT,
             )
           }
+          if (e instanceof SlotUnavailableError && e.accountCredentialInvalid && account && this.deps.pool) {
+            this.deps.pool.markAuthRequired(account.id, e.message)
+            throw e
+          }
           const detail = e instanceof SlotUnavailableError ? e.message : brief(String(e))
           throw new LlmError(detail, Err.AGY_ERROR)
         }
@@ -2387,12 +2462,15 @@ export class AgyAdapter extends LlmAdapter {
     const runLogHome = agyHomeDirFor(account)
     const runLogsBefore = snapshotAgyLogs(runLogHome)
     const effectiveProxy = account?.proxyUrl || cfg.proxyUrl || detectSystemProxy() || undefined
+    const bridge = this.deps.getBridge?.()
+    const sessionSecret = bridge && sessionKey !== '' ? bridge.registerSession(sessionKey) : undefined
     const env = {
       ...process.env,
       // Identity for the MCP reverse bridge (issue #55): agy passes its env to
       // the MCP server it spawns, so the bridge script learns which DSH session
       // this run belongs to and the host can resolve the calling agent.
       ...(sessionKey === '' ? {} : { DSH_MCP_SESSION: sessionKey }),
+      ...(sessionSecret ? { DSH_MCP_SESSION_SECRET: sessionSecret } : {}),
       ...(cfg.disableTelemetry
         ? {
             DO_NOT_TRACK: '1',
@@ -2534,6 +2612,7 @@ export class AgyAdapter extends LlmAdapter {
       // would ever return the concurrency slot. releaseOnce() no-ops when the
       // catch already released.
       if (!spawned) {
+        if (bridge && sessionSecret) bridge.revokeSession(sessionKey, sessionSecret)
         releaseOnce()
         this.clearInFlightPrompt(sessionKey, prompt)
       }
@@ -2541,6 +2620,7 @@ export class AgyAdapter extends LlmAdapter {
 
     void (async () => {
       const outcome = await proc.outcome
+      if (bridge && sessionSecret) bridge.revokeSession(sessionKey, sessionSecret)
       releaseOnce()
       stopToolHeartbeat()
       openToolKeys.clear()
