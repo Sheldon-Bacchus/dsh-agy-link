@@ -28,13 +28,12 @@ const MCP_SERVER_KEY = 'dsh-tools'
 /**
  * Tools that must NEVER be exposed to an external MCP client. These are
  * internal transports / loopback-only helpers of the plugin itself:
- *  - `run_code`  — the deployment's model-only wrapper around code execution.
  *  - `agy_ask`   — the plugin's own ask tool (would recurse into agy).
  *  - `agy_tool`  — replays recorded agy tool activity back into DSH; calling it
  *                   over the bridge would let the agy child re-enter the bridge.
  * Kept in one place so the /tools listing and the /call guard can never drift.
  */
-const INTERNAL_TOOL_NAMES = new Set(['run_code', 'agy_ask', 'agy_tool'])
+const INTERNAL_TOOL_NAMES = new Set(['agy_ask', 'agy_tool'])
 
 /** Minimal structural view of the DSH tool registry we need. */
 export interface ToolsServiceLike {
@@ -321,8 +320,9 @@ export function startMcpBridge(opts: {
           // PTC requires the host-owned transport so nested calls retain its policy checks.
           const callId = 'agy-mcp-' + callSeq
           const isPtc = svc.schemas(agent).some((tool) => tool.name === 'run_code')
-          const dispatchName = isPtc ? 'run_code' : dshName
-          const dispatchArgs = isPtc
+          const wrapPtc = isPtc && dshName !== 'run_code'
+          const dispatchName = wrapPtc ? 'run_code' : dshName
+          const dispatchArgs = wrapPtc
             ? { code: `return await tools[${JSON.stringify(dshName)}](${JSON.stringify(parsed.arguments ?? {})});`, description: `MCP call: ${dshName}` }
             : parsed.arguments ?? {}
           const result = await svc.execute({

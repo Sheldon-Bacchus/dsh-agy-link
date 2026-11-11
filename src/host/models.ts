@@ -242,6 +242,12 @@ export class ModelCatalog {
     };
   }
 
+  accountCatalogDiagnostics(): Record<string, { source: Catalog['source']; count: number; ids: string[] }> {
+    return Object.fromEntries(Array.from(this.accountCatalogs, ([id, catalog]) => [id, {
+      source: catalog.source, count: catalog.models.length, ids: catalog.models.map((model) => model.id),
+    }]))
+  }
+
   /**
    * Return the complete full set of all known models across fallbacks, base
    * discovered catalog, per-account discovered catalogs, and quota-reported models.

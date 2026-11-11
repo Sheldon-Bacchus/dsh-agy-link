@@ -950,6 +950,7 @@ export function apply(ctx: Context, entryConfig: Record<string, unknown> = {}): 
         const allKnown = catalog.getAllKnownModels(pool.getAccounts())
         sendJson(res as RawRes, 200, {
           plugin: 'dsh-agy-link',
+          accountCatalogs: catalog.accountCatalogDiagnostics(),
           bin: bin(),
           version: versionCache,
           dormantReason,
