@@ -88,9 +88,21 @@ export function resolveModelInfo(deps: ModelResolutionDeps, model: string): LlmR
     context: { contextWindow },
     defaultMaxTokens: typeof cfg.maxTokensDefault === 'number' && cfg.maxTokensDefault > 0 ? cfg.maxTokensDefault : 8192,
   }
-  if (deps.isEffortUnsupported(cleanId)) {
-    // Learned refusal (issue #67): do not offer levels the model rejects.
-  } else if (entry && Array.isArray(entry.efforts) && entry.efforts.length > 0) {
+  // Never hide the reasoning axis from DSH just because agy refused `--effort` once.
+  //
+  // DSH's llm orchestrator treats "model info has no reasoning" as "this model has no
+  // reasoning axis at all" and hard-fails EVERY call that carries a reasoningEffort
+  // (app.asar dsh-llm resolveCallWithInfo):
+  //   provider "antigravity" model "gemini-3.8-flash" does not support reasoning effort "high"
+  // That validation runs before the adapter's streamAttempt, so the self-healing replay in
+  // stream-with-effort-retry.ts never gets a chance to run — a learned refusal (#67) used to
+  // turn into a fatal error for every caller (SWS routing defaults, Team member inheritance,
+  // manual level picks) until the process restarted.
+  //
+  // The refusal is only about the CLI flag: the catalog still advertises the levels, and the
+  // adapter already drops the flag for learned models (adapter.ts / streamAttempt). Keep the
+  // two concerns apart: advertise capabilities honestly, suppress the flag at invocation time.
+  if (entry && Array.isArray(entry.efforts) && entry.efforts.length > 0) {
     const cleanEfforts = Array.from(new Set(entry.efforts.filter((e) => typeof e === 'string' && e.trim() !== '')))
     if (cleanEfforts.length > 0) {
       const def = defaultEffortFor({ ...entry, efforts: cleanEfforts }, cfg)
