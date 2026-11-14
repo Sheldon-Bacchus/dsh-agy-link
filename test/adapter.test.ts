@@ -1695,7 +1695,7 @@ test('listModels and resolveModel defensively handle empty IDs, empty names, and
   assert.equal(resolvedNoEffort.reasoning, undefined)
 })
 
-test('listModels exposes union of models across all accounts while resolveModel remains pure', async () => {
+test('listModels lists the full catalog regardless of account entitlement while resolveModel remains pure', async () => {
   let activeId = 'acc_free'
   const accounts: Record<string, any> = {
     acc_free: {
@@ -1735,24 +1735,29 @@ test('listModels exposes union of models across all accounts while resolveModel 
     ],
   }, { pool: fakePool as any })
 
-  // 1. With free account active: only models supported by acc_free are listed (argon excluded)
+  // 1. The picker lists the FULL catalog no matter which account is active.
+  //    An account-scoped view used to hide Argon/Hydrogen entirely whenever the
+  //    active account lacked the entitlement, so a pooled checkout could never
+  //    select them. Listing is advisory; dispatch routes and fails over.
   activeId = 'acc_free'
   const freeModels = await adapter.listModels('antigravity')
   assert.ok(freeModels.some((m) => m.id === 'gemini-3.8-flash'))
-  assert.ok(!freeModels.some((m) => m.id === 'gemini-4-argon'), 'free account without argon must not advertise argon in picker')
+  assert.ok(freeModels.some((m) => m.id === 'gemini-4-argon'), 'the picker still lists Argon while a free account is active')
 
-  // 2. When switched to pro account: argon is listed in the picker
+  // 2. Switching accounts does not change the advertised set
   activeId = 'acc_pro'
   const proModels = await adapter.listModels('antigravity')
-  assert.ok(proModels.some((m) => m.id === 'gemini-4-argon'), 'pro account must advertise argon in picker')
+  assert.deepEqual(proModels.map((m) => m.id), freeModels.map((m) => m.id))
 
-  // 3. Resolving gemini-4-argon succeeds from union models without mutating active account (pure query)
+  // 3. Resolving gemini-4-argon succeeds from the full catalog without mutating active account (pure query)
   activeId = 'acc_free'
   const resolved = await adapter.resolveModel('antigravity', 'gemini-4-argon')
   assert.equal(resolved.id, 'gemini-4-argon')
   assert.equal(activeId, 'acc_free', 'resolveModel must remain side-effect free')
 
-  // 3. When NO account in the pool has Argon access, Argon is excluded
+  // 4. A pool without any Argon-capable account STILL lists Argon: the listing
+  //    is advisory, and dispatch is what refuses (see the 'lack argon access'
+  //    stream test below).
   const fakePoolNoArgon = {
     ...fakePool,
     getAccounts: () => [accounts['acc_free']],
@@ -1767,7 +1772,7 @@ test('listModels exposes union of models across all accounts while resolveModel 
     ],
   }, { pool: fakePoolNoArgon as any })
   const freeOnlyModels = await adapterNoArgon.listModels('antigravity')
-  assert.ok(!freeOnlyModels.some((m) => m.id === 'gemini-4-argon'), 'pool without any argon accounts must not show gemini-4-argon')
+  assert.ok(freeOnlyModels.some((m) => m.id === 'gemini-4-argon'), 'listing stays advisory even when no account has Argon access')
 })
 
 test('N lookups of an unavailable model do not rewrite or mutate the pool', async () => {

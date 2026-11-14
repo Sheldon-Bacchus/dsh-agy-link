@@ -33,19 +33,18 @@ export function listAvailableModels(deps: ModelResolutionDeps): readonly LlmMode
   const cfg = deps.getConfig()
   const activeAcc = activeAccount(deps)
 
-  // When an active account is selected, the picker shows only the models supported
-  // by that specific account (e.g. an account without Argon access will not display
-  // Argon in its picker). If no active account is resolved, falls back to the union.
-  let models: readonly CatalogEntry[]
-  if (activeAcc && pool) {
-    models = deps.catalog.getModelsForAccount(activeAcc, pool)
-    if (!deps.catalog.hasAccountCatalog(activeAcc.id)) {
-      // Read path: throttled, change-only announcements. Never use the
-      // always-broadcasting account-switch path here (issue #106).
-      void deps.catalog.ensureAccountCatalog(activeAcc.id).catch(() => undefined)
-    }
-  } else {
-    models = deps.catalog.getUnion(accounts, pool)
+  // The picker lists the FULL catalog (agy's own lineup + everything any pooled
+  // account discovered) instead of the active account's subset. Filtering hid
+  // Argon/Hydrogen entirely whenever the active account lacked the entitlement,
+  // so a pooled checkout could never pick them. Listing is advisory: dispatch
+  // still routes per account and fails over (onModelUnsupported).
+  const models = deps.catalog.getFullCatalog(accounts)
+
+  // Still warm the active account's catalog: discovery feeds the discovered
+  // half of the full catalog. Read path only — throttled, change-only
+  // announcements, never the account-switch broadcaster (issue #106).
+  if (activeAcc && pool && !deps.catalog.hasAccountCatalog(activeAcc.id)) {
+    void deps.catalog.ensureAccountCatalog(activeAcc.id).catch(() => undefined)
   }
 
   const { entries, dropped } = sanitizeCatalogEntries(models)
@@ -74,10 +73,11 @@ export function resolveModelInfo(deps: ModelResolutionDeps, model: string): LlmR
   const rawModel = typeof model === 'string' ? model.trim() : ''
   const cleanId = rawModel !== '' ? rawModel : cfg.defaultModel
 
-  const unionModels = deps.catalog.getUnion(accounts, pool)
-  const allModels = deps.catalog.getAllKnownModels(accounts)
-  const entry = unionModels.find((m) => m.id === cleanId)
-    ?? allModels.find((m) => m.id === cleanId)
+  // Same full catalog the picker lists, so a model that only exists in the
+  // offline lineup (no account ever discovered it) still resolves with its real
+  // name and effort ladder instead of falling back to the bare id.
+  const fullModels = deps.catalog.getFullCatalog(accounts)
+  const entry = fullModels.find((m) => m.id === cleanId)
     ?? findEntry(deps.catalog.get(activeAcc?.id), cleanId)
     ?? findEntry(deps.catalog.get(), cleanId)
   const rawName = entry ? entry.name : cleanId

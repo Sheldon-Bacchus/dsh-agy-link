@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.22-local.1 (2026-11-14)
+
+### English
+
+- **Local patch: the model picker lists the FULL catalog.** `listAvailableModels()` served `getModelsForAccount(activeAccount)`, so an active account without Argon/Hydrogen entitlement hid those models from the whole picker — a pooled checkout could never select them. It now serves the new `ModelCatalog.getFullCatalog(accounts)`: the offline agy lineup in agy's own order, plus every id any pooled account discovered, deduped, with no plan or per-account filtering. `resolveModelInfo()` resolves from the same catalog, so a lineup-only model keeps its real name and effort ladder (Hydrogen still offers `xhigh`, labelled Extra). Listing is advisory: dispatch still routes per account and fails over through `onModelUnsupported`. Tests updated: a free active account now advertises Argon, and a pool with no Argon-capable account still lists it. Not published to npm — installed from a local tarball.
+
+### 中文
+
+- **本地补丁：模型选择器列出全部模型。** `listAvailableModels()` 原来按“当前账号”的已发现目录返回，账号没有 Argon/Hydrogen 权益时这些模型会被整体隐藏（多账号池里根本无法选）。现改为新的 `ModelCatalog.getFullCatalog(accounts)`：agy 自带阵容（保持 agy 顺序）+ 所有账号发现到的模型，去重后不再按套餐/账号裁剪。`resolveModelInfo()` 使用同一目录，因此只存在于阵容里的模型也有正确名称与思考档位（Hydrogen 的 `xhigh` 仍显示 Extra）。列表只作参考，派发仍按账号路由并在不支持时切换（`onModelUnsupported`）。测试同步更新：免费账号处于 active 时也列出 Argon，池内没有任何 Argon 账号时同样列出。未发布到 npm，使用本地 tarball 安装。
+
 ## 0.6.22 (2026-11-13)
 
 ### English

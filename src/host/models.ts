@@ -316,6 +316,37 @@ export class ModelCatalog {
   }
 
   /**
+   * Full catalog for a "list everything" picker: the offline lineup (agy's own
+   * order) plus every model any pooled account ever discovered. Nothing is
+   * filtered by the active account's plan or entitlement — listing is advisory,
+   * and dispatch still routes per account and fails over (see host/adapter.ts
+   * onModelUnsupported). An account without Argon/Hydrogen access used to hide
+   * those models from the whole picker, so a pooled checkout could never
+   * select them.
+   */
+  getFullCatalog(accounts: readonly ManagedAccount[] = []): readonly CatalogEntry[] {
+    const list: CatalogEntry[] = []
+    const seen = new Set<string>()
+    // 1. What agy itself prints (model-lineup.ts keeps agy's own order). These
+    //    entries are pushed verbatim, so a user-configured lineup that repeats
+    //    an id still reaches sanitizeCatalogEntries, which reports it (issue #1).
+    for (const m of buildFallbackCatalog(this.fallbackDefs)) {
+      if (!m) continue
+      seen.add(m.id)
+      list.push(m)
+    }
+    // 2. Anything else a pooled account discovered (e.g. a family the offline
+    //    lineup does not know yet). Skipped when the lineup already has the id,
+    //    so the picker keeps agy's name and order instead of discovering it twice.
+    for (const m of this.getAllKnownModels(accounts)) {
+      if (!m || !m.id || seen.has(m.id)) continue
+      seen.add(m.id)
+      list.push(m)
+    }
+    return list
+  }
+
+  /**
    * Return the authoritative real models for a specific managed account.
    * If the account's catalog was discovered from `agy models`, returns its models directly.
    * If not yet discovered, uses current discovered models filtered by account capabilities.
