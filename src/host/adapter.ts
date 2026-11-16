@@ -13,6 +13,7 @@ import { modelFamilyOf, type ManagedAccount, type ModelFamily } from '../common/
 import type { AccountPoolManager } from './pool.ts'
 import { conversationsDirFor, diffConversations, snapshotConversations } from './discovery.ts'
 import { EventMapper, toToolCallId } from './mapper.ts'
+import { resolveToolTransport } from './tool-mode.ts'
 import { parseMirrorCallId, type RunRecording, type RunRegistry } from './recording.ts'
 import { accountHasArgon, defaultEffortFor, findEntry, isArgonModel, ModelCatalog, resolveModelSlug, sanitizeCatalogEntries } from './models.ts'
 import { StreamJsonParser } from './parser.ts'
@@ -26,6 +27,7 @@ import { SENT_IMAGE_IDS_MAX, type SessionStore } from './sessions.ts'
 import { readFullToolArgs, readStepThoughts, clearAgyDbCache } from './agy-db.ts'
 import { getGitHeadContent } from './mirror-tool.ts'
 import { detectGoalContext, isGoalToolContinuation, isPlanToolContinuation, isPlanMode, type GoalContext } from './dsh-goal.ts'
+import type { McpBridge, SessionBridgeScope } from './mcp-bridge.ts'
 
 type ForeignSource = { source?: { kind?: string; provider?: string; callId?: string; replayState?: unknown } }
 
@@ -384,6 +386,10 @@ export interface AgyAdapterDeps {
   getMediaBaseUrl?: () => string | null
   /** Synchronizes active model selection back to DSH input box / session */
   syncSessionModel?: (sessionId: string, model: string, effort?: string) => void
+  /** Access to the active McpBridge instance for session-scoped capability leasing. */
+  mcpBridge?: () => McpBridge | null
+  /** Resolve the active Agent handle for a given session id (fail-closed if unavailable). */
+  sessionAgent?: (sessionId: string) => unknown
 }
 
 // ---- stream() -------------------------------------------------------------
@@ -910,9 +916,15 @@ export class AgyAdapter extends LlmAdapter {
     // so DSH's toolview can render terminal/diff cards instead of "replay agy
     // tool step N · run_command" code rows.
     const toolNames = new Set((options.tools ?? []).map((t) => t.name))
-    const isCodeMode = toolNames.has('run_code') && !toolNames.has('agy_tool')
-    const hasToolSupport = options.tools === undefined || toolNames.has('agy_tool') || toolNames.has('run_code')
+    const transport = resolveToolTransport(cfg.toolMode, options.tools, toolNames)
+    const isCodeMode = transport.isCodeMode
+    const hasToolSupport = transport.hasToolSupport
     const sessionKey = options.sessionId !== undefined ? String(options.sessionId) : ''
+    this.warnOnce(
+      'toolmode:' + (sessionKey || 'anon') + ':' + transport.mode,
+      'agy tool transport = ' + transport.mode + ' (' + transport.reason + '); declared tools = ' +
+        (options.tools === undefined ? 'none' : '[' + [...toolNames].join(',') + ']'),
+    )
     // cwd precedence: explicit config > the DSH session's own workspace >
     // the host process cwd. The last fallback can land agy in an UNRELATED
     // directory (wherever the DSH server was started) — with permissionMode
@@ -1848,9 +1860,12 @@ export class AgyAdapter extends LlmAdapter {
         // best-effort
       }
     }
+    let sessionScope: SessionBridgeScope | null = null
     const releaseOnce = (): void => {
       if (released) return
       released = true
+      sessionScope?.dispose()
+      sessionScope = null
       releaseSlotLease()
       release?.()
       release = null
@@ -1883,8 +1898,28 @@ export class AgyAdapter extends LlmAdapter {
     // network; only this log separates the two.
     const runLogHome = agyHomeDirFor(account)
     const runLogsBefore = snapshotAgyLogs(runLogHome)
+    const bridge = this.deps.mcpBridge?.()
+    if (bridge && cfg.mcpBridge && cfg.enabled) {
+      if (sessionKey !== '') {
+        const agent = this.deps.sessionAgent?.(sessionKey)
+        if (agent) {
+          sessionScope = bridge.registerScope({
+            sessionId: sessionKey,
+            agent,
+            signal: options.signal,
+          })
+          this.deps.log?.('mcp session scope registered for session ' + sessionKey)
+        } else {
+          this.deps.log?.(
+            'mcp session scope: agent handle not found for session ' + sessionKey + ' (fail-closed, no Lead guessing)',
+          )
+        }
+      } else {
+        this.deps.log?.('mcp session scope: missing sessionId (fail-closed, cannot establish agent identity)')
+      }
+    }
     const effectiveProxy = account?.proxyUrl || cfg.proxyUrl || detectSystemProxy() || undefined
-    const env = {
+    const env: Record<string, string | undefined> = {
       ...process.env,
       ...(cfg.disableTelemetry
         ? {
@@ -1897,6 +1932,17 @@ export class AgyAdapter extends LlmAdapter {
       ...(account && account.dir ? isolatedHomeEnv(account.dir) : {}),
       // Dedicated account proxy wins, then global config proxy, then detected system proxy.
       ...proxyEnvFor(effectiveProxy),
+    }
+
+    // Never allow a child process to inherit stale MCP bridge tokens from the host process
+    delete env.DSH_MCP_URL
+    delete env.DSH_MCP_TOKEN
+    delete env.DSH_MCP_SESSION_TOKEN
+
+    if (sessionScope) {
+      env.DSH_MCP_URL = sessionScope.url
+      env.DSH_MCP_TOKEN = sessionScope.token
+      env.DSH_MCP_SESSION_TOKEN = sessionScope.token
     }
 
     let proc: ReturnType<typeof startAgyProcess>

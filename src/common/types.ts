@@ -92,6 +92,18 @@ export interface PluginConfig {
   mcpBridge: boolean
   /** Comma-separated tool-name allowlist for the MCP bridge (empty = all non-internal). */
   mcpToolAllowlist: string
+  /**
+   * How agy tool calls travel back to DSH. 'auto' (default) infers the mode
+   * from the tool list DSH hands us; 'code' always routes through the
+   * `run_code` wrapper; 'native' always exposes agy's own tools.
+   *
+   * Why this knob exists: in Code Mode DSH dispatches ONLY `run_code`. A spawn
+   * sub-session can arrive with no tool list at all, and guessing 'native'
+   * there made agy advertise its own tools while the host rejected every call
+   * with "only run_code is callable directly" — the child ended up with zero
+   * usable tools.
+   */
+  toolMode: 'auto' | 'code' | 'native'
   /** Maximum requests allowed per minute across all sessions (0 = disabled). */
   rateLimitPerMinute: number
   /** Automatically fallback to available lower-tier model if active model is exhausted. */
@@ -196,6 +208,7 @@ export function defaultConfig(): PluginConfig {
     mediaMaxImages: 8,
     mcpBridge: false,
     mcpToolAllowlist: '',
+    toolMode: 'auto',
     rateLimitPerMinute: 0,
     autoFallbackModel: false,
     logRetentionDays: 7,

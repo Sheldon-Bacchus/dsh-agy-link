@@ -45,6 +45,11 @@ function asBool(v: unknown): boolean | undefined {
   return undefined
 }
 
+function asToolMode(v: unknown): 'auto' | 'code' | 'native' | undefined {
+  if (v === 'auto' || v === 'code' || v === 'native') return v
+  return undefined
+}
+
 function asNum(v: unknown): number | undefined {
   if (typeof v === 'number' && Number.isFinite(v)) return v
   if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
@@ -126,6 +131,7 @@ export function resolveConfig(
     mediaMaxImages: asNum(get('mediaMaxImages')) ?? base.mediaMaxImages,
     mcpBridge: asBool(get('mcpBridge')) ?? base.mcpBridge,
     mcpToolAllowlist: asString(get('mcpToolAllowlist')) ?? base.mcpToolAllowlist,
+    toolMode: asToolMode(get('toolMode')) ?? base.toolMode,
     rateLimitPerMinute: asNum(get('rateLimitPerMinute')) ?? base.rateLimitPerMinute,
     autoFallbackModel: asBool(get('autoFallbackModel')) ?? base.autoFallbackModel,
     logRetentionDays: asNum(get('logRetentionDays')) ?? base.logRetentionDays,
